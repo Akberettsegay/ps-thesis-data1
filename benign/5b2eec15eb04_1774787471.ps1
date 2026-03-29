@@ -1,0 +1,175 @@
+﻿function Sync-O365PersonalContact {
+    <#
+    .SYNOPSIS
+    Synchronizes Users, Contacts and Guests to Personal Contacts of given user.
+
+    .DESCRIPTION
+    Synchronizes Users, Contacts and Guests to Personal Contacts of given user.
+    Includes Department and Manager fields when available.
+    When Category is provided, assigns those categories to synchronized contacts.
+
+    .PARAMETER Filter
+    Filters to apply to users. It can be used to filter out users that you don't want to synchronize.
+    You should use Sync-O365PersonalContactFilter, Sync-O365PersonalContactFilterGroup, or Sync-O365PersonalContactFilterOData to create filter(s).
+
+    .PARAMETER UserId
+    Identity of the user to synchronize contacts to. It can be UserID or UserPrincipalName.
+
+    .PARAMETER MemberTypes
+    Member types to synchronize. By default it will synchronize only 'Member'. You can also specify 'Guest' and 'Contact'.
+
+    .PARAMETER RequireEmailAddress
+    Sync only users that have email address.
+
+    .PARAMETER DoNotRequireAccountEnabled
+    Do not require account to be enabled. By default account must be enabled, otherwise it will be skipped.
+
+    .PARAMETER DoNotRequireAssignedLicenses
+    Do not require assigned licenses. By default user must have assigned licenses, otherwise it will be skipped.
+    The licenses are checked by looking at AssignedLicenses property of the user, and not the actual license types.
+
+    .PARAMETER IncludeExternalUsers
+    Allows unlicensed external users to be included when assigned licenses are required.
+    Use 'Guest' to include users with UserType = Guest.
+    Use 'ExtUPN' to include users with #EXT# in UserPrincipalName.
+
+    .PARAMETER ExcludeHiddenFromAddressList
+    Best-effort exclusion for users whose Graph showInAddressList property is explicitly set to false.
+    Microsoft documents showInAddressList as "Do not use in Microsoft Graph", so
+    Graph mode should be treated as an opt-in compatibility fallback only.
+    Users are left in scope when showInAddressList is null, missing, or not returned by Graph.
+    With HiddenAddressListSource Exchange, Exchange Online is used instead and
+    both users and contacts can be filtered when Exchange reports the recipient
+    as hidden from the address list.
+
+    .PARAMETER HiddenAddressListSource
+    Controls whether hidden-address-list filtering uses Microsoft Graph or
+    Exchange Online as the source of truth. Graph is the default only to preserve
+    the current auth model for callers that explicitly opt into this fallback.
+    Exchange is the recommended authoritative source and requires an active
+    Exchange session.
+
+    .PARAMETER GuidPrefix
+    Prefix of the GUID that is used to identify contacts that were synchronized by O365Synchronizer.
+    By default no prefix is used, meaning GUID of the user will be used as File, As property of the contact.
+
+    .PARAMETER FolderName
+    Name of the folder to synchronize contacts to. If not set it will synchronize contacts to the main folder.
+
+    .PARAMETER Category
+    Categories assigned to synchronized personal contacts.
+
+    .EXAMPLE
+    Sync-O365PersonalContact -UserId 'przemyslaw.klys@test.pl' -Verbose -MemberTypes 'Contact', 'Member' -WhatIf
+
+    .EXAMPLE
+    Sync-O365PersonalContact -UserId 'przemyslaw.klys@evotec.pl' -MemberTypes 'Contact', 'Member' -GuidPrefix 'O365Synchronizer' -PassThru {
+        Sync-O365PersonalContactFilter -Type Include -Property 'CompanyName' -Value 'Evotec*','Ziomek*' -Operator 'like'
+        Sync-O365PersonalContactFilterGroup -Type Include -GroupID 'e7772951-4b0e-4f10-8f38-eae9b8f55962'
+    } -FolderName 'O365Sync' | Format-Table
+
+    .EXAMPLE
+    Sync-O365PersonalContact -UserId 'user@contoso.com' -MemberTypes 'Member', 'Guest' -IncludeExternalUsers 'Guest', 'ExtUPN' -Verbose
+
+    .EXAMPLE
+    # opt-in, best-effort Graph fallback only
+    Sync-O365PersonalContact -UserId 'user@contoso.com' -MemberTypes 'Member' -ExcludeHiddenFromAddressList -HiddenAddressListSource Graph -Verbose
+
+    .EXAMPLE
+    # recommended authoritative filtering via Exchange Online (Connect-ExchangeOnline first)
+    Sync-O365PersonalContact -UserId 'user@contoso.com' -MemberTypes 'Member', 'Contact' -ExcludeHiddenFromAddressList -HiddenAddressListSource Exchange -Verbose
+
+    .EXAMPLE
+    Sync-O365PersonalContact -UserId 'user@contoso.com' -FolderName 'O365Sync' -RequireEmailAddress -Verbose
+
+    .EXAMPLE
+    Sync-O365PersonalContact -UserId 'user@contoso.com' -MemberTypes 'Member' -Category 'Friends', 'Work' -Verbose
+
+    .EXAMPLE
+    # clear categories assigned by sync
+    Sync-O365PersonalContact -UserId 'user@contoso.com' -MemberTypes 'Member' -Category @() -Verbose
+
+    .EXAMPLE
+    Sync-O365PersonalContact -UserId 'user@contoso.com' -MemberTypes 'Member' -PassThru {
+        Sync-O365PersonalContactFilterOData -Filter "onPremisesExtensionAttributes/extensionAttribute5 eq 'MYFILTER'" -ConsistencyLevel eventual -CountVariable userCount -PageSize 999
+    }
+
+    .EXAMPLE
+    Sync-O365PersonalContact -UserId 'user@contoso.com' -MemberTypes 'Member' -PassThru {
+        Sync-O365PersonalContactFilter -Type Include -Property 'OnPremisesExtensionAttributes.ExtensionAttribute5' -Value @('MYFILTER') -Operator 'Equal'
+    }
+
+    .NOTES
+    General notes
+    #>
+    [CmdletBinding(SupportsShouldProcess)]
+    param(
+        [Parameter(Position = 0)][scriptblock] $Filter,
+        [Parameter(Position = 1)][string[]] $UserId,
+        [Parameter(Position = 2)][ValidateSet('Member', 'Guest', 'Contact')][string[]] $MemberTypes = @('Member'),
+        [switch] $RequireEmailAddress,
+        [Parameter(Position = 3)][string] $GuidPrefix,
+        [Parameter(Position = 4)][string] $FolderName,
+        [switch] $DoNotRequireAccountEnabled,
+        [switch] $DoNotRequireAssignedLicenses,
+        [Parameter(Position = 5)][ValidateSet('Guest', 'ExtUPN')][string[]] $IncludeExternalUsers,
+        [switch] $ExcludeHiddenFromAddressList,
+        [HiddenAddressListSource] $HiddenAddressListSource = [HiddenAddressListSource]::Graph,
+        [Parameter(Position = 6)][Alias('Categories')][string[]] $Category,
+        [switch] $PassThru
+    )
+
+    Initialize-DefaultValuesO365
+    if ($ExcludeHiddenFromAddressList -and $HiddenAddressListSource -eq [HiddenAddressListSource]::Graph -and $MemberTypes -contains 'Contact') {
+        Write-Warning 'ExcludeHiddenFromAddressList with HiddenAddressListSource Graph applies only to user objects. Microsoft Graph org contacts do not expose an equivalent hidden-from-address-list property.'
+    }
+
+    # Lets get all users and cache them
+    $getO365ExistingMembersSplat = @{
+        MemberTypes             = $MemberTypes
+        RequireAccountEnabled   = -not $DoNotRequireAccountEnabled.IsPresent
+        RequireAssignedLicenses = -not $DoNotRequireAssignedLicenses.IsPresent
+        UserProvidedFilter      = $Filter
+    }
+    if ($PSBoundParameters.ContainsKey('IncludeExternalUsers')) {
+        $getO365ExistingMembersSplat['IncludeExternalUsers'] = $IncludeExternalUsers
+    }
+    if ($ExcludeHiddenFromAddressList) {
+        $getO365ExistingMembersSplat['ExcludeHiddenFromAddressList'] = $true
+        $getO365ExistingMembersSplat['HiddenAddressListSource'] = $HiddenAddressListSource
+    }
+
+    $ExistingUsers = Get-O365ExistingMembers @getO365ExistingMembersSplat
+    if ($ExistingUsers -eq $false -or $ExistingUsers -is [Array]) {
+        return
+    }
+
+    foreach ($User in $UserId) {
+        $FolderInformation = Initialize-FolderName -UserId $User -FolderName $FolderName
+        if ($FolderInformation -eq $false) {
+            return
+        }
+        # Lets get all contacts of given person and cache them
+        $ExistingContacts = Get-O365ExistingUserContacts -UserID $User -GuidPrefix $GuidPrefix -FolderName $FolderName
+        if ($ExistingContacts -eq $false) {
+            continue
+        }
+        $syncInternalSplat = @{
+            FolderInformation  = $FolderInformation
+            UserId             = $User
+            ExistingUsers      = $ExistingUsers
+            ExistingContacts   = $ExistingContacts
+            MemberTypes        = $MemberTypes
+            RequireEmailAddress = $RequireEmailAddress.IsPresent
+            GuidPrefix         = $GuidPrefix
+            WhatIf             = $WhatIfPreference
+        }
+        if ($PSBoundParameters.ContainsKey('Category')) {
+            $syncInternalSplat['Category'] = $Category
+        }
+        $Actions = Sync-InternalO365PersonalContact @syncInternalSplat
+        if ($PassThru) {
+            $Actions
+        }
+    }
+}

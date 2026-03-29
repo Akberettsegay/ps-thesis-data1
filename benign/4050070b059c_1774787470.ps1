@@ -1,0 +1,95 @@
+﻿function Set-O365OrgContact {
+    <#
+    .SYNOPSIS
+    Updates organization contacts in Exchange when changes are detected.
+
+    .DESCRIPTION
+    Compares source objects with existing contacts and updates mail
+    contact/contact properties as needed.
+
+    .PARAMETER CurrentContactsCache
+    Cache of current contacts keyed by SMTP address.
+
+    .PARAMETER MailContact
+    Existing mail contact object.
+
+    .PARAMETER Contact
+    Existing contact object.
+
+    .PARAMETER Source
+    Source user object.
+
+    .PARAMETER SourceContact
+    Source contact object.
+    #>
+    [CmdletBinding(SupportsShouldProcess)]
+    param(
+        [System.Collections.IDictionary] $CurrentContactsCache,
+        [Object] $MailContact,
+        [Object] $Contact,
+        [Object] $Source,
+        [Object] $SourceContact
+    )
+    Write-Color -Text "[i] ", "Checking ", $Source.DisplayName, " / ", $Source.PrimarySmtpAddress, " for updates" -Color Yellow, White, Cyan, White, Cyan
+    if ($Source -and $SourceContact) {
+        if (-not $MailContact) {
+            $MailContact = $CurrentContactsCache[$Source.PrimarySmtpAddress].MailContact
+        }
+        $MismatchedMailContact = [ordered] @{}
+        [Array] $MismatchedPropertiesMailContact = foreach ($Property in $Source.PSObject.Properties.Name) {
+            if ($Source.$Property -ne $MailContact.$Property) {
+                if ([string]::IsNullOrEmpty($Source.$Property) -and [string]::IsNullOrEmpty($MailContact.$Property) ) {
+
+                } else {
+                    # Property is not empty on both sides, and they are not equal
+                    $Property
+                    $MismatchedMailContact[$Property] = $Source.$Property
+                }
+            }
+        }
+
+        if (-not $Contact) {
+            $Contact = $CurrentContactsCache[$Source.PrimarySmtpAddress].Contact
+        }
+
+        $MismatchedContact = [ordered] @{}
+        [Array] $MismatchedPropertiesContact = foreach ($Property in $SourceContact.PSObject.Properties.Name) {
+            if ($SourceContact.$Property -ne $Contact.$Property) {
+                if ([string]::IsNullOrEmpty($SourceContact.$Property) -and [string]::IsNullOrEmpty($Contact.$Property) ) {
+
+                } else {
+                    # Property is not empty on both sides, and they are not equal
+                    $Property
+                    $MismatchedContact[$Property] = $SourceContact.$Property
+                }
+            }
+        }
+        if ($MismatchedPropertiesMailContact.Count -gt 0 -or $MismatchedPropertiesContact.Count -gt 0) {
+            Write-Color -Text "[i] ", "Mismatched properties for ", $Source.DisplayName, " / ", $Source.PrimarySmtpAddress, " are: ", ($MismatchedPropertiesMailContact + $MismatchedPropertiesContact -join ', ') -Color Yellow, White, DarkCyan, White, Cyan
+            $ErrorValue = $false
+            if ($MismatchedPropertiesMailContact.Count -gt 0) {
+                Write-Color -Text "[*] ", "Updating mail contact for ", $Source.DisplayName, " / ", $Source.PrimarySmtpAddress -Color Yellow, Green, DarkCyan, White, Cyan
+                try {
+                    Set-MailContact -Identity $MailContact.Identity -WhatIf:$WhatIfPreference -ErrorAction Stop @MismatchedMailContact
+                } catch {
+                    $ErrorValue = $true
+                    Write-Color -Text "[e] ", "Failed to update mail contact. Error: ", ($_.Exception.Message -replace ([Environment]::NewLine), " " )-Color Red, White, Red
+                }
+            }
+            if ($MismatchedPropertiesContact.Count -gt 0) {
+                Write-Color -Text "[*] ", "Updating contact for ", $Source.DisplayName, " / ", $Source.PrimarySmtpAddress -Color Yellow, Green, DarkCyan, White, Cyan
+                try {
+                    Set-Contact -Identity $MailContact.Identity -WhatIf:$WhatIfPreference -ErrorAction Stop @MismatchedContact
+                } catch {
+                    $ErrorValue = $true
+                    Write-Color -Text "[e] ", "Failed to update contact. Error: ", ($_.Exception.Message -replace ([Environment]::NewLine), " " )-Color Red, White, Red
+                }
+            }
+            if ($ErrorValue -eq $false) {
+                $true
+            }
+        } else {
+            #Write-Color -Text "[i] ", "No mismatched properties for ", $Source.DisplayName, " / ", $Source.PrimarySmtpAddress -Color Yellow, White, DarkCyan, White, Cyan
+        }
+    }
+}

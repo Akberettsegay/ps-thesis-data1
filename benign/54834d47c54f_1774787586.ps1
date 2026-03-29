@@ -1,0 +1,177 @@
+<#
+MindMiner  Copyright (C) 2017-2022  Oleg Samsonov aka Quake4
+https://github.com/Quake4/MindMiner
+License GPL-3.0
+#>
+
+. .\Code\Get-Rest.ps1
+. .\Code\SummaryInfo.ps1
+. .\Code\AlgoInfo.ps1
+. .\Code\PoolInfo.ps1
+. .\Code\MinerInfo.ps1
+. .\Code\BaseConfig.ps1
+. .\Code\Get-ProcessOutput.ps1
+. .\Code\Get-CPUFeatures.ps1
+. .\Code\Get-DeviceInfo.ps1
+. .\Code\Get-ManagementObject.ps1
+. .\Code\Config.ps1
+. .\Code\MinerProfitInfo.ps1
+. .\Code\HumanInterval.ps1
+. .\Code\StatInfo.ps1
+. .\Code\MultipleUnit.ps1
+. .\Code\Start-Command.ps1
+. .\Code\ShareInfo.ps1
+. .\Code\MinerProcess.ps1
+. .\Code\Get-Prerequisites.ps1
+. .\Code\Get-Config.ps1
+. .\Code\Get-Speed.ps1
+. .\Code\Update-Miner.ps1
+. .\Code\Get-PoolInfo.ps1
+. .\Code\Get-ElectricityPrice.ps1
+. .\Code\Get-RateInfo.ps1
+. .\Code\Get-FormatOutput.ps1
+. .\Code\Start-ApiServer.ps1
+. .\Code\Clear-Miners.ps1
+. .\Code\Get-ProfitLowerFloor.ps1
+. .\Code\DeviceInfo.ps1
+. .\Code\Out-DeviceInfo.ps1
+. .\Code\Select-ActiveTypes.ps1
+. .\Code\MRR.ps1
+
+function Get-Pool ([Parameter(Mandatory = $true)] [string] $algorithm) {
+	$pool = $AllPools | Where-Object -Property Algorithm -eq $algorithm | Select-Object -First 1
+	if ($pool) { $pool } else { $null }
+}
+
+function Get-Algo ([Parameter(Mandatory)] [string] $algorithm, [bool] $skipDisabled = $true) {
+	$algo = if ($AllAlgos.Mapping.$algorithm) { $AllAlgos.Mapping.$algorithm } else { (Get-Culture).TextInfo.ToTitleCase($algorithm) }
+	# check asics and user disabled
+	$algo = if ($skipDisabled -and ($AllAlgos.Disabled -and $AllAlgos.Disabled -contains $algo -or $AllAlgos.DisabledAlgorithms -contains $algo)) { $null } else { $algo }
+	$algo
+}
+
+function Set-Stat (
+	[Parameter(Mandatory)] [string] $Filename,
+	[string] $Key = [string]::Empty,
+	[Parameter(Mandatory)] [decimal] $Value,
+	[string] $Interval) {
+	# fix very high value
+	$val = $Statistics.GetValue($Filename, $Key) * $Config.MaximumAllowedGrowth
+	if ($val -gt 0 -and $Value -gt $val) { $Value = $val }
+	$Statistics.SetValue($Filename, $Key, $Value, $Interval)
+}
+
+function Remove-Stat (
+	[Parameter(Mandatory)] [string] $Filename,
+	[Parameter(Mandatory)] [string] $Interval) {
+	$Statistics.DelValues($Filename, $Interval);
+}
+
+function Get-Question-All-Reset {
+	$global:GetQuestionAll = $false
+}
+
+function Get-Question ([Parameter(Mandatory)] [string] $Question, [bool] $All = $false) {
+	Write-Host "$Question`? " -NoNewline
+	if ($All -and $global:GetQuestionAll) {
+		Write-Host "Yes" -ForegroundColor Green
+		return $true
+	}
+	Write-Host "(" -NoNewline
+	Write-Host "Y" -NoNewline -ForegroundColor Yellow
+	Write-Host "es/" -NoNewline
+	if ($All) {
+		Write-Host "Yes " -NoNewline
+		Write-Host "A" -NoNewline -ForegroundColor Yellow
+		Write-Host "ll/" -NoNewline
+	}
+	Write-Host "N" -NoNewline -ForegroundColor Yellow
+	Write-Host "o): " -NoNewline
+	[ConsoleKeyInfo] $y = [Console]::ReadKey($true)
+	$result = $false
+	if ($y.Key -eq [ConsoleKey]::Y) { $result = $true }
+	elseif ($All -and $y.Key -eq [ConsoleKey]::A) {
+		$global:GetQuestionAll = $true
+		$result = $true
+	}
+	if ($result) { Write-Host "Yes" -NoNewline -ForegroundColor Green }
+	else { Write-Host "No" -NoNewline -ForegroundColor Red }
+	Write-Host " Thanks"
+	return $result
+}
+
+function ReadOrCreatePoolConfig (
+	[Parameter(Mandatory)] [string] $EnableQuestion,
+	[Parameter(Mandatory)] [string] $Filename,
+	[Parameter(Mandatory)] $Cnfg) {
+	if ([BaseConfig]::Exists($Filename)) {
+		$cfg = [BaseConfig]::Read($Filename)
+		if ($global:AskPools -eq $true) {
+			$cfg.Enabled = (Get-Question $EnableQuestion)
+			[BaseConfig]::Save($Filename, $cfg)
+		}
+		$cfg
+	}
+	elseif ($global:HasConfirm -eq $true) {
+		if (![string]::IsNullOrWhiteSpace($EnableQuestion)) {
+			$Cnfg.Enabled = (Get-Question $EnableQuestion)
+		}
+		[BaseConfig]::ReadOrCreate($Filename, $Cnfg)
+	}
+	else {
+		$global:NeedConfirm = $true
+	}
+}
+
+function ReadOrCreateMinerConfig (
+	[Parameter(Mandatory)] [string] $EnableQuestion,
+	[Parameter(Mandatory)] [string] $Filename,
+	[Parameter(Mandatory)] $cfg) {
+	if ([BaseConfig]::Exists($Filename)) {
+		[BaseConfig]::Read($Filename)
+	}
+	elseif (!$Config.ConfirmMiner) {
+		[BaseConfig]::ReadOrCreate($Filename, $cfg)
+	}
+	elseif ($global:HasConfirm -eq $true) {
+		if (![string]::IsNullOrWhiteSpace($EnableQuestion)) {
+			$cfg.Enabled = (Get-Question $EnableQuestion)
+		}
+		[BaseConfig]::ReadOrCreate($Filename, $cfg)
+	}
+	else {
+		$global:NeedConfirm = $true
+	}
+}
+
+[hashtable] $CCMinerStatsAvg = @{ "Allium" = 1; "Phi" = 1; "Tribus" = 1; "Lyra2re2" = 1; "Lyra2v3" = 1; "Lyra2z" = 1; "Verushash" = 1; "X17" = 1; "Xevan" = 1; "Yescryptr32" = 1 }
+
+function Get-CCMinerStatsAvg (
+	[Parameter(Mandatory)] [string] $algo, # Get-Algo
+	[Parameter(Mandatory)] $info # AlgoInfo or AlgoInfoEx
+) {
+	if (!$algo -or !$info) { [ArgumentNullException]::new("Get-CCMinerStatsAvg") }
+	[string] $result = [string]::Empty
+	if (!$info -or ($info -and (!$info.ExtraArgs -or ($info.ExtraArgs -and !$info.ExtraArgs.Contains("-N "))))) {
+		$result = "-N $(if ($CCMinerStatsAvg.$algo) { $CCMinerStatsAvg.$algo } else { 3 })"
+	}
+	$result
+}
+
+function Get-Join (
+	[Parameter(Mandatory)] [string] $separator,
+	[array] $items
+) {
+	($items | Where-Object { ![string]::IsNullOrWhiteSpace($_) }) -join $separator
+}
+
+function Get-ProxyAddress (
+	[Parameter(Mandatory)] [string] $address
+) {
+	$hst = $address
+	try {
+		$hst = [uri]::new($address).Host
+	}
+	catch { }
+	return "http://$hst`:$([Config]::ApiPort)/"
+}
