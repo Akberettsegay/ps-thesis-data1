@@ -1,0 +1,62 @@
+Param([Parameter(Mandatory = $false)] [Switch]$RebootSkip)
+$host.ui.RawUI.WindowTitle = "cloudstreaming"
+Start-Transcript -Path "$PSScriptRoot\Log.txt"
+function Elevated {
+  $id = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+  $p = New-Object System.Security.Principal.WindowsPrincipal($id)
+  if ($p.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator))
+  { Write-Output $true }      
+  else
+  { Write-Output $false }   
+}
+
+if (-not(Elevated)) {
+  throw "Please run this script as a built-in or elevated Administrator" 
+  Stop-Transcript
+  Pause
+}
+
+Clear-Host
+
+if (!$RebootSkip) {
+  Write-Host "Your machine may restart at least once during this setup! Please save important work!" -ForegroundColor Red
+  Write-Host ""
+  $OldVersion = (Read-Host "Are you using Windows Server 2019 and below? (y/n)").ToLower() -eq "y"
+  Write-Host ""
+  if ($OldVersion) {
+    Write-Host "Your current version of Windows Server is out of date. Please update to continue." -ForegroundColor Red
+    Read-Host "Press enter to exit"
+    [Environment]::Exit(0)
+  }
+  Write-Host "Making special directories for the script..."
+  New-Item -Path C:\cloudstreaming -ItemType directory | Out-Null
+  New-Item -Path C:\cloudstreaming\Installers -ItemType directory | Out-Null
+  New-Item -Path C:\cloudstreaming\Drivers -ItemType directory | Out-Null
+  Write-Host ""
+  Write-Host "Step 1 - Installing required software..." -ForegroundColor Yellow
+  & $PSScriptRoot\Steps\step1.ps1
+  Write-Host "Step 2 - Completing various tasks and requirements..."
+  & $PSScriptRoot\Steps\step2.ps1 
+  Write-Host "Step 3 - Installing video and audio drivers..."
+  & $PSScriptRoot\Steps\step3.ps1
+}
+else {
+  if (Get-ScheduledTask | Where-Object { $_.TaskName -like "Continue" }) {
+    Unregister-ScheduledTask -TaskName "Continue" -Confirm:$false
+    Remove-Item -Path "$([Environment]::GetFolderPath('Desktop'))\Continue.lnk"
+  }
+  Write-Host "Welcome back, let's move onto the final steps!"
+}
+Write-Host ""
+Write-Host "Step 4 - Disabling extra display adapters..." -ForegroundColor Yellow
+& $PSScriptRoot\Steps\step4.ps1
+Write-Host ""
+Write-Host "Step 5 - Installing applications..." -ForegroundColor Yellow
+& $PSScriptRoot\Steps\step5.ps1
+Write-Host ""
+Write-Host "Script and server setup is now complete!"
+
+$restart = (Read-Host "It is recommenended to restart your server. Restart now? (y/n)").ToLower();
+if ($restart -eq "y") {
+  Restart-Computer -Force 
+}

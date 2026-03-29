@@ -1,0 +1,67 @@
+<#
+.SYNOPSIS
+    Remove a Windows Update from WSUS.
+.DESCRIPTION
+    Use the function "Get-WindowsUpdateInfoFromWSUS" to get the ID/GUID of a update you want to remove.
+.NOTES
+    Author: Robin Hermann
+.LINK
+    http://wiki.webperfect.ch
+.EXAMPLE
+    Remove-WindowsUpdateFromWSUS -WSUSServer <YourWSUS> -RemoveUpdateID <ID/GUID_of_the_Patch>
+    Remove a Windows Update from WSUS.
+#>
+
+Function Remove-WindowsUpdateFromWSUS {
+    [CmdletBinding()]
+ 
+    param (
+        [Parameter(Mandatory=$false)]
+        [String]$WSUSServer = "localhost",
+ 
+        [Parameter(Mandatory=$false)]
+        [Int32]$PortNumber = 8530,
+ 
+        [Parameter(Mandatory=$false)]
+        [Boolean]$useSecureConnection = $False,
+ 
+        [Parameter(Mandatory=$false)]
+        [String]$KB = "",
+ 
+        [Parameter(Mandatory=$false)]
+        [String]$RemoveUpdateID = ""
+    )
+ 
+    Process {
+        # Load .NET assembly
+        [void][reflection.assembly]::LoadWithPartialName("Microsoft.UpdateServices.Administration")
+        $WSUS = [Microsoft.UpdateServices.Administration.AdminProxy]::GetUpdateServer($WSUSServer,$False,$PortNumber)
+        Write-Host "Connected sucessfully" -foregroundcolor "Green"
+ 
+        #UpdateID (GUID of the update) to delete 
+        If (!$RemoveUpdateID) {
+            $IDOfUpdateToRemove = ($WSUS.GetUpdates() | Where-Object {$_.Title -match $KB}).Id.UpdateId.ToString()
+            $RemoveUpdateID = $IDOfUpdateToRemove
+        }
+ 
+        $updatescope = New-Object Microsoft.UpdateServices.Administration.UpdateScope
+        $u=$WSUS.GetUpdates($updatescope)
+ 
+        Foreach ($u1 in $u) {
+            $a=New-Object Microsoft.UpdateServices.Administration.UpdateRevisionId
+            $a=$u1.id  
+ 
+            If ($a.UpdateId -eq $RemoveUpdateID) {  
+                     Write-Host "Deleting update " $a.UpdateId "..."
+                      $WSUS.DeleteUpdate($a.UpdateId)
+            }
+        }  
+ 
+        trap {
+            write-host "Error Occurred"
+            write-host "Exception Message: " 
+            write-host $_.Exception.Message
+            write-host $_.Exception.StackTrace
+        }
+    }
+}

@@ -1,0 +1,51 @@
+﻿param(
+    [Parameter(Mandatory = $false, HelpMessage = "The GitHub event name that triggered the workflow.")]
+    [string] $workflowEventName = $env:GITHUB_EVENT_NAME,
+    [Parameter(Mandatory = $false, HelpMessage = "Comma-separated value of branch name patterns to include if they exist. If not specified, only the current branch is returned. Wildcards are supported.")]
+    [string] $includeBranches
+)
+
+$gitHubHelperPath = Join-Path $PSScriptRoot '../Github-Helper.psm1' -Resolve
+Import-Module $gitHubHelperPath -DisableNameChecking
+
+switch ($workflowEventName) {
+    'schedule' {
+      Write-Host "Event is schedule: getting branches from settings"
+      $settings = ConvertFrom-Json $env:Settings
+
+      # Add defensive check to handle if workflowSchedule.includeBranches is not defined in settings
+      if (($settings.PSObject.Properties.Name -eq "workflowSchedule") -and ($settings.workflowSchedule.PSObject.Properties.Name -eq "includeBranches") -and $($settings.workflowSchedule.includeBranches)) {
+        $branchPatterns = @($($settings.workflowSchedule.includeBranches))
+      }
+      else {
+        Write-Host "No branch patterns defined in settings"
+        $branchPatterns = @()
+      }
+    }
+    { $_ -in 'workflow_dispatch', 'workflow_call' } {
+      Write-Host "Event is $($_): getting branches from input"
+      $branchPatterns = @($includeBranches.Split(',') | ForEach-Object { $_.Trim() })
+    }
+  }
+
+# Default to the current branch if no branch patterns are specified
+if (-not $branchPatterns) {
+    $branchPatterns = @($env:GITHUB_REF_NAME)
+}
+
+Write-Host "Filtering branches by: $($branchPatterns -join ', ')"
+
+invoke-git fetch --quiet --no-tags
+$allBranches = @(invoke-git -returnValue for-each-ref --format="%(refname:short)" refs/remotes/origin | Where-Object { $_.StartsWith('origin/') } | ForEach-Object { $_.Substring('origin/'.Length) } | Where-Object { $_ -ne 'HEAD' }) # Get all remote branches except symbolic 'HEAD', stripping the 'origin/' prefix
+$branches = @()
+
+foreach ($branchPattern in $branchPatterns) {
+    $branches += $allBranches | Where-Object { $_ -like $branchPattern }
+}
+
+$branches = @($branches | Select-Object -Unique)
+Write-Host "Found git branches: $($branches -join ', ')"
+
+# Add the branches to the output
+$ResultJSON = $(ConvertTo-Json @{ branches = $branches } -Depth 99 -Compress)
+Add-Content -Encoding UTF8 -Path $env:GITHUB_OUTPUT -Value "Result=$ResultJSON"

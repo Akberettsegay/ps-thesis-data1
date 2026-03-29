@@ -1,0 +1,95 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+Document 'index' {
+    Title 'Baselines'
+
+    $metadata = [ordered]@{
+        generated = 'true'
+        title = 'Baselines'
+    }
+
+    Metadata $metadata
+
+    Import-Module ./out/modules/PSRule.Rules.Azure
+    $baselines = Get-PSRuleBaseline -Module PSRule.Rules.Azure -WarningAction SilentlyContinue;
+
+    Section 'Quarterly baselines' {
+        'Quarterly baselines provide a quarterly checkpoint of rules.'
+
+        Section 'GA' {
+            'The following baselines relate to generally available Azure features.'
+
+            $baselines | Where-Object { $_.Name -like 'Azure.GA_*' } | Sort-Object -Property Name -Descending | Table -Property @{ Name = 'Name'; Expression = {
+                "[$($_.Name)]($($_.Name).md)"
+            }}, Synopsis, @{ Name = 'Status'; Expression = {
+                if ($_.Flags -eq 'None') {
+                    'Latest'
+                }
+                else {
+                    $_.Flags.ToString()
+                }
+            }}
+
+        }
+
+        Section 'Preview' {
+            'The following baselines relate to preview Azure features.'
+
+            $baselines | Where-Object { $_.Name -like 'Azure.Preview_*' } | Sort-Object -Property Name -Descending | Table -Property @{ Name = 'Name'; Expression = {
+                "[$($_.Name)]($($_.Name).md)"
+            }}, Synopsis, @{ Name = 'Status'; Expression = {
+                if ($_.Flags -eq 'None') {
+                    'Latest'
+                }
+                else {
+                    $_.Flags.ToString()
+                }
+            }}
+        }
+    }
+
+    Section 'Pillar specific baselines' {
+        'Pillar specific baselines provide a focused set of rules for a specific Azure Well-Architected Pillar.'
+
+        $baselines | Where-Object { $_.Name -like 'Azure.Pillar.*' } | Sort-Object -Property Name -Descending | Table -Property @{ Name = 'Name'; Expression = {
+            "[$($_.Name)]($($_.Name).md)"
+        }}, Synopsis, @{ Name = 'Status'; Expression = {
+            if ($_.Flags -eq 'None') {
+                'Latest'
+            }
+            else {
+                $_.Flags.ToString()
+            }
+        }}
+    }
+
+    Section 'Cloud Adoption Framework baselines' {
+        'Pillar specific baselines provide a focused set of rules that assist with implementing naming and tagging conventions recommended by the Azure Cloud Adoption Framework (CAF).'
+
+        
+
+        $sorted = $baselines | Where-Object { $_.Name -like 'Azure.CAF_*' } | ForEach-Object {
+            [PSCustomObject]@{
+                Name = $_.Name
+                Synopsis = $_.Synopsis
+                Flags = $_.Flags
+                Version = $_.Metadata.Annotations.moduleVersion
+                Priority = if ($_.Name -like '*_Compatibility') { 0 } else { 1 }
+            }
+        } | Sort-Object -Property Version,Priority -Descending;
+
+        $top = $sorted | Select-Object -First 1;
+
+        $sorted | Table -Property @{ Name = 'Name'; Expression = {
+            "[$($_.Name)]($($_.Name).md)"
+        }}, Synopsis, @{ Name = 'Status'; Expression = {
+            if ($_ -eq $top) {
+                'Latest'
+            }
+            else {
+                'Previous'
+            }
+        }}
+    }
+}
