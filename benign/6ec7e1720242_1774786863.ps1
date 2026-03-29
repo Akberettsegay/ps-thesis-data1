@@ -1,0 +1,430 @@
+﻿function Get-AzOpsResourceDefinition {
+
+    <#
+        .SYNOPSIS
+            This cmdlet discovers resources (Management Groups, Subscriptions, Resource Groups, Resources, Privileged Identity Management resources, Policies, Role Assignments) from the provided input scope.
+        .DESCRIPTION
+            This cmdlet discovers resources (Management Groups, Subscriptions, Resource Groups, Resources, Privileged Identity Management resources, Policies, Role Assignments) from the provided input scope.
+        .PARAMETER Scope
+            Discovery Scope
+        .PARAMETER IncludeResourcesInResourceGroup
+            Discover only resources in these resource groups.
+        .PARAMETER IncludeResourceType
+            Discover only specific resource types.
+        .PARAMETER SkipChildResource
+            Skip childResource discovery.
+        .PARAMETER SkipPim
+            Skip discovery of Privileged Identity Management.
+        .PARAMETER SkipLock
+            Skip discovery of resourceLock.
+        .PARAMETER SkipPolicy
+            Skip discovery of policies.
+        .PARAMETER SkipResource
+            Skip discovery of resources inside resource groups.
+        .PARAMETER SkipResourceGroup
+            Skip discovery of resource groups.
+        .PARAMETER SkipResourceType
+            Skip discovery of specific resource types.
+        .PARAMETER SkipRole
+            Skip discovery of roles for better performance.
+        .PARAMETER SkipSubscription
+            Filter which Subscription IDs should be excluded from pull.
+        .PARAMETER StatePath
+            The root folder under which to write the resource json.
+        .PARAMETER SubscriptionsToIncludeChildResource
+            Filter which Subscription IDs should include child resources in pull.
+        .PARAMETER SubscriptionsToIncludeResourceGroups
+            Filter which Subscription IDs should include Resource Groups in pull.
+        .EXAMPLE
+            $TenantRootId = '/providers/Microsoft.Management/managementGroups/{0}' -f (Get-AzTenant).Id
+            Get-AzOpsResourceDefinition -scope $TenantRootId -Verbose
+            Discover all resources from root Management Group
+        .EXAMPLE
+            Get-AzOpsResourceDefinition -scope /providers/Microsoft.Management/managementGroups/landingzones -SkipPolicy -SkipResourceGroup
+            Discover all resources from child Management Group, skip discovery of policies and resource groups
+        .EXAMPLE
+            Get-AzOpsResourceDefinition -scope /subscriptions/623625ae-cfb0-4d55-b8ab-0bab99cbf45c
+            Discover all resources from Subscription level
+        .EXAMPLE
+            Get-AzOpsResourceDefinition -scope /subscriptions/623625ae-cfb0-4d55-b8ab-0bab99cbf45c/resourceGroups/myresourcegroup
+            Discover all resources from resource group level
+        .EXAMPLE
+            Get-AzOpsResourceDefinition -scope /subscriptions/623625ae-cfb0-4d55-b8ab-0bab99cbf45c/resourceGroups/contoso-global-dns/providers/Microsoft.Network/privateDnsZones/privatelink.database.windows.net
+            Discover a single resource
+    #>
+
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        $Scope,
+
+        [string[]]
+        $IncludeResourcesInResourceGroup = (Get-PSFConfigValue -FullName 'AzOps.Core.IncludeResourcesInResourceGroup'),
+
+        [string[]]
+        $IncludeResourceType = (Get-PSFConfigValue -FullName 'AzOps.Core.IncludeResourceType'),
+
+        [switch]
+        $SkipChildResource = (Get-PSFConfigValue -FullName 'AzOps.Core.SkipChildResource'),
+
+        [switch]
+        $SkipPim = (Get-PSFConfigValue -FullName 'AzOps.Core.SkipPim'),
+
+        [switch]
+        $SkipLock = (Get-PSFConfigValue -FullName 'AzOps.Core.SkipLock'),
+
+        [switch]
+        $SkipPolicy = (Get-PSFConfigValue -FullName 'AzOps.Core.SkipPolicy'),
+
+        [switch]
+        $SkipResource = (Get-PSFConfigValue -FullName 'AzOps.Core.SkipResource'),
+
+        [switch]
+        $SkipResourceGroup = (Get-PSFConfigValue -FullName 'AzOps.Core.SkipResourceGroup'),
+
+        [string[]]
+        $SkipResourceType = (Get-PSFConfigValue -FullName 'AzOps.Core.SkipResourceType'),
+
+        [switch]
+        $SkipRole = (Get-PSFConfigValue -FullName 'AzOps.Core.SkipRole'),
+
+        [string[]]
+        $SkipSubscription = (Get-PSFConfigValue -FullName 'AzOps.Core.SkipSubscription'),
+
+        [Parameter(Mandatory = $false)]
+        [string]
+        $StatePath = (Get-PSFConfigValue -FullName 'AzOps.Core.State'),
+
+        [string[]]
+        $SubscriptionsToIncludeChildResource = (Get-PSFConfigValue -FullName 'AzOps.Core.SubscriptionsToIncludeChildResource'),
+
+        [string[]]
+        $SubscriptionsToIncludeResourceGroups = (Get-PSFConfigValue -FullName 'AzOps.Core.SubscriptionsToIncludeResourceGroups')
+    )
+
+    begin {
+        # Set variables for retry with exponential backoff
+        $backoffMultiplier = 2
+        $maxRetryCount = 3
+        # Prepare Input Data for parallel processing
+        $runspaceData = @{
+            AzOpsPath                            = "$($script:ModuleRoot)\AzOps.psd1"
+            StatePath                            = $StatePath
+            runspace_AzOpsAzManagementGroup      = $script:AzOpsAzManagementGroup
+            runspace_AzOpsSubscriptions          = $script:AzOpsSubscriptions
+            runspace_AzOpsPartialRoot            = $script:AzOpsPartialRoot
+            runspace_AzOpsResourceProvider       = $script:AzOpsResourceProvider
+            runspace_AzOpsGraphResourceProvider  = $script:AzOpsGraphResourceProvider
+            BackoffMultiplier                    = $backoffMultiplier
+            MaxRetryCount                        = $maxRetryCount
+        }
+    }
+
+    process {
+        Write-AzOpsMessage -LogLevel Important -LogString 'Get-AzOpsResourceDefinition.Processing' -LogStringValues $Scope
+        try {
+            $scopeObject = New-AzOpsScope -Scope $Scope -StatePath $StatePath -ErrorAction Stop
+        }
+        catch {
+            Write-AzOpsMessage -LogLevel Warning -LogString 'Get-AzOpsResourceDefinition.Processing.NotFound' -LogStringValues $Scope
+            return
+        }
+        if ($scopeObject.Type -notin 'subscriptions', 'managementGroups') {
+            Write-AzOpsMessage -LogLevel Verbose -LogString 'Get-AzOpsResourceDefinition.Finished' -LogStringValues $scopeObject.Scope
+            return
+        }
+        switch ($scopeObject.Type) {
+            subscriptions {
+                Write-AzOpsMessage -LogLevel Important -LogString 'Get-AzOpsResourceDefinition.Subscription.Processing' -LogStringValues $ScopeObject.SubscriptionDisplayName, $ScopeObject.Subscription -Target $ScopeObject
+                    $subscriptions = Get-AzSubscription -SubscriptionId $scopeObject.Name | Where-Object {
+                    "/subscriptions/$($_.Id)" -in $script:AzOpsSubscriptions.id -and
+                    $_.Id -notin $SkipSubscription
+                }
+            }
+            managementGroups {
+                Write-AzOpsMessage -LogLevel Important -LogString 'Get-AzOpsResourceDefinition.ManagementGroup.Processing' -LogStringValues $ScopeObject.ManagementGroupDisplayName, $ScopeObject.ManagementGroup -Target $ScopeObject
+                $query = "resourcecontainers | where type == 'microsoft.management/managementgroups' | order by ['id'] asc"
+                $managementgroups = Search-AzOpsAzGraph -ManagementGroupName $scopeObject.Name -Query $query -ErrorAction Stop | Where-Object { $_.id -in $script:AzOpsAzManagementGroup.Id }
+                $subscriptions = Get-AzOpsNestedSubscription -Scope $scopeObject.Name
+                if ($managementgroups) {
+                    # Process managementGroup scope in parallel
+                    $managementgroups | Foreach-Object -ThrottleLimit (Get-PSFConfigValue -FullName 'AzOps.Core.ThrottleLimit') -Parallel {
+                        $managementgroup = $_
+                        $runspaceData = $using:runspaceData
+
+                        Import-Module "$([PSFramework.PSFCore.PSFCoreHost]::ModuleRoot)/PSFramework.psd1"
+                        $azOps = Import-Module $runspaceData.AzOpsPath -Force -PassThru
+
+                        & $azOps {
+                            $script:AzOpsAzManagementGroup = $runspaceData.runspace_AzOpsAzManagementGroup
+                            $script:AzOpsSubscriptions = $runspaceData.runspace_AzOpsSubscriptions
+                            $script:AzOpsPartialRoot = $runspaceData.runspace_AzOpsPartialRoot
+                            $script:AzOpsResourceProvider = $runspaceData.runspace_AzOpsResourceProvider
+                            $script:AzOpsGraphResourceProvider = $runspaceData.runspace_AzOpsGraphResourceProvider
+                        }
+                        # Process Privileged Identity Management resources and Roles at managementGroup scope
+                        if ((-not $using:SkipPim) -or (-not $using:SkipRole)) {
+                            & $azOps {
+                                $ScopeObject = New-AzOpsScope -Scope $managementgroup.id -StatePath $runspaceData.Statepath -ErrorAction Stop
+                                if (-not $using:SkipPim) {
+                                    Get-AzOpsPim -ScopeObject $ScopeObject -StatePath $runspaceData.Statepath
+                                }
+                                if (-not $using:SkipRole) {
+                                    Get-AzOpsRole -ScopeObject $ScopeObject -StatePath $runspaceData.Statepath
+                                }
+                            }
+                        }
+                    }
+                    Clear-PSFMessage
+                }
+            }
+        }
+        #region Process Policies at $scopeObject
+        if (-not $SkipPolicy) {
+            Get-AzOpsPolicy -ScopeObject $scopeObject -Subscription $subscriptions -StatePath $StatePath
+        }
+        #endregion Process Policies at $scopeObject
+
+        #region Process subscription scope in parallel
+        if ($subscriptions) {
+            $subscriptions | Foreach-Object -ThrottleLimit (Get-PSFConfigValue -FullName 'AzOps.Core.ThrottleLimit') -Parallel {
+                $subscription = $_
+                $runspaceData = $using:runspaceData
+
+                Import-Module "$([PSFramework.PSFCore.PSFCoreHost]::ModuleRoot)/PSFramework.psd1"
+                $azOps = Import-Module $runspaceData.AzOpsPath -Force -PassThru
+
+                & $azOps {
+                    $script:AzOpsAzManagementGroup = $runspaceData.runspace_AzOpsAzManagementGroup
+                    $script:AzOpsSubscriptions = $runspaceData.runspace_AzOpsSubscriptions
+                    $script:AzOpsPartialRoot = $runspaceData.runspace_AzOpsPartialRoot
+                    $script:AzOpsResourceProvider = $runspaceData.runspace_AzOpsResourceProvider
+                    $script:AzOpsGraphResourceProvider = $runspaceData.runspace_AzOpsGraphResourceProvider
+                }
+                # Process Privileged Identity Management resources, Locks and Roles at subscription scope
+                if ((-not $using:SkipPim) -or (-not $using:SkipLock) -or (-not $using:SkipRole)) {
+                    & $azOps {
+                        $scopeObject = New-AzOpsScope -Scope ($subscription.Type + '/' + $subscription.Id) -StatePath $runspaceData.Statepath -ErrorAction Stop
+                        if (-not $using:SkipPim) {
+                            Get-AzOpsPim -ScopeObject $scopeObject -StatePath $runspaceData.Statepath
+                        }
+                        if (-not $using:SkipLock) {
+                            Get-AzOpsResourceLock -ScopeObject $scopeObject -StatePath $runspaceData.Statepath
+                        }
+                        if (-not $using:SkipRole) {
+                            Get-AzOpsRole -ScopeObject $scopeObject -StatePath $runspaceData.Statepath
+                        }
+                    }
+                }
+            }
+            Clear-PSFMessage
+        }
+        #endregion Process subscription scope in parallel
+
+        #region Process Resource Groups
+        if ($SkipResourceGroup -or (-not $subscriptions)) {
+            if ($SkipResourceGroup) {
+                Write-AzOpsMessage -LogLevel Debug -LogString 'Get-AzOpsResourceDefinition.SkippingResourceGroup' -Target $ScopeObject
+            }
+            else {
+                Write-AzOpsMessage -LogLevel Debug -LogString 'Get-AzOpsResourceDefinition.Subscription.NotFound' -Target $ScopeObject
+            }
+        }
+        else {
+            $query = "resourcecontainers | where type == 'microsoft.resources/subscriptions/resourcegroups' | where managedBy == '' | order by ['id'] asc"
+            if ($SubscriptionsToIncludeResourceGroups -ne '*') {
+                $newSubscriptionsToIncludeResourceGroups = $subscriptions | Where-Object {
+                    $_.Id -in $SubscriptionsToIncludeResourceGroups -and
+                    $_.Id -notin $SkipSubscription
+                }
+                if ($newSubscriptionsToIncludeResourceGroups) {
+                    $resourceGroups = Search-AzOpsAzGraph -Subscription $newSubscriptionsToIncludeResourceGroups -Query $query -ErrorAction Stop
+                }
+                else {
+                    Write-AzOpsMessage -LogLevel Debug -LogString 'Get-AzOpsResourceDefinition.Subscription.NotFound' -Target $ScopeObject
+                }
+            }
+            else {
+                $resourceGroups = Search-AzOpsAzGraph -Subscription $subscriptions -Query $query -ErrorAction Stop
+            }
+            if ($resourceGroups) {
+                # Process Resource Groups in parallel
+                $resourceGroups | Foreach-Object -ThrottleLimit (Get-PSFConfigValue -FullName 'AzOps.Core.ThrottleLimit') -Parallel {
+                    $resourceGroup = $_
+                    $runspaceData = $using:runspaceData
+
+                    Import-Module "$([PSFramework.PSFCore.PSFCoreHost]::ModuleRoot)/PSFramework.psd1"
+                    $azOps = Import-Module $runspaceData.AzOpsPath -Force -PassThru
+
+                    & $azOps {
+                        $script:AzOpsAzManagementGroup = $runspaceData.runspace_AzOpsAzManagementGroup
+                        $script:AzOpsSubscriptions = $runspaceData.runspace_AzOpsSubscriptions
+                        $script:AzOpsPartialRoot = $runspaceData.runspace_AzOpsPartialRoot
+                        $script:AzOpsResourceProvider = $runspaceData.runspace_AzOpsResourceProvider
+                        $script:AzOpsGraphResourceProvider = $runspaceData.runspace_AzOpsGraphResourceProvider
+                    }
+                    # Create Resource Group in file system
+                    & $azOps {
+                        ConvertTo-AzOpsState -Resource $resourceGroup -StatePath $runspaceData.Statepath
+                    }
+                    # Process Privileged Identity Management resources, Locks and Roles at resource group scope
+                    if ((-not $using:SkipPim) -or (-not $using:SkipRole) -or (-not $using:SkipLock)) {
+                        & $azOps {
+                            $rgScopeObject = New-AzOpsScope -Scope $resourceGroup.id -StatePath $runspaceData.Statepath -ErrorAction Stop
+                            if (-not $using:SkipLock) {
+                                Get-AzOpsResourceLock -ScopeObject $rgScopeObject -StatePath $runspaceData.Statepath
+                            }
+                            if (-not $using:SkipPim) {
+                                Get-AzOpsPim -ScopeObject $rgScopeObject -StatePath $runspaceData.Statepath
+                            }
+                            if (-not $using:SkipRole) {
+                                Get-AzOpsRole -ScopeObject $rgScopeObject -StatePath $runspaceData.Statepath
+                            }
+                        }
+                    }
+                }
+                Clear-PSFMessage
+            }
+            else {
+                Write-AzOpsMessage -LogLevel Debug -LogString 'Get-AzOpsResourceDefinition.NoResourceGroup' -LogStringValues $scopeObject.Name -Target $ScopeObject
+            }
+            # Process Policies at Resource Group scope
+            if (-not $SkipPolicy) {
+                if ($newSubscriptionsToIncludeResourceGroups) {
+                    Get-AzOpsPolicy -ScopeObject $scopeObject -Subscription $subscriptions -SubscriptionsToIncludeResourceGroups $newSubscriptionsToIncludeResourceGroups -ResourceGroup -StatePath $StatePath
+                }
+                else {
+                    Get-AzOpsPolicy -ScopeObject $scopeObject -Subscription $subscriptions -ResourceGroup -StatePath $StatePath
+                }
+            }
+            # Process Resources at Resource Group scope
+            if (-not $SkipResource) {
+                Write-AzOpsMessage -LogLevel Verbose -LogString 'Get-AzOpsResourceDefinition.Processing.Resource.Discovery' -LogStringValues $scopeObject.Name -Target $ScopeObject
+                try {
+                    # Skip resources with null or empty resource group
+                    $query = "resources | where isnotempty(resourceGroup)"
+                    $SkipResourceType | ForEach-Object { $skipResourceTypes += ($(if($skipResourceTypes){","}) + "'" + $_  + "'") }
+                    $query = $query + " and type !in~ ($skipResourceTypes)"
+                    if ($IncludeResourceType -ne "*") {
+                        $IncludeResourceType | ForEach-Object { $includeResourceTypes += ($(if($includeResourceTypes){","}) + "'" + $_  + "'") }
+                        $query = $query + " and type in~ ($includeResourceTypes)"
+                    }
+                    if ($IncludeResourcesInResourceGroup -ne "*") {
+                        $IncludeResourcesInResourceGroup | ForEach-Object { $includeResourcesInResourceGroups += ($(if($includeResourcesInResourceGroups){","}) + "'" + $_  + "'") }
+                        $query = $query + " and resourceGroup in~ ($includeResourcesInResourceGroups)"
+                    }
+                    $query = $query + " | order by ['id'] asc"
+                    $resourcesBase = Search-AzOpsAzGraph -Subscription $subscriptions -Query $query -ErrorAction Stop
+                }
+                catch {
+                    Write-AzOpsMessage -LogLevel Warning -LogString 'Get-AzOpsResourceDefinition.Processing.Resource.Warning' -LogStringValues $scopeObject.Name, $_ -Target $ScopeObject
+                }
+                if ($resourcesBase) {
+                    $resources = @()
+                    foreach ($resource in $resourcesBase) {
+                        # Skip resources with null or empty resource group to prevent Export-AzResourceGroup errors
+                        if ([string]::IsNullOrEmpty($resource.resourceGroup)) {
+                            Write-AzOpsMessage -LogLevel Debug -LogString 'Get-AzOpsResourceDefinition.Processing.Resource.SkippingNoResourceGroup' -LogStringValues $resource.name, $resource.id -Target $resource
+                            continue
+                        }
+                        if ($resourceGroups | Where-Object { $_.name -eq $resource.resourceGroup -and $_.subscriptionId -eq $resource.subscriptionId }) {
+                            Write-AzOpsMessage -LogLevel Verbose -LogString 'Get-AzOpsResourceDefinition.Processing.Resource' -LogStringValues $resource.name, $resource.resourcegroup -Target $resource
+                            $resources += $resource
+                            ConvertTo-AzOpsState -Resource $resource -StatePath $Statepath
+                        }
+                    }
+                }
+                else {
+                    Write-AzOpsMessage -LogLevel Debug -LogString 'Get-AzOpsResourceDefinition.Processing.Resource.Discovery.NotFound' -LogStringValues $scopeObject.Name -Target $ScopeObject
+                }
+            }
+            else {
+                Write-AzOpsMessage -LogLevel Debug -LogString 'Get-AzOpsResourceDefinition.SkippingResources' -Target $ScopeObject
+            }
+            # Process Child resources at resource scope in parallel
+            if ($resources.Count -gt 0) {
+                if (-not $SkipResource -and -not $SkipChildResource) {
+                    if ($SubscriptionsToIncludeChildResource -ne '*') {
+                        $resources = $resources | Where-Object { $_.subscriptionId -in $SubscriptionsToIncludeChildResource }
+                    }
+                    $resources | Foreach-Object -ThrottleLimit (Get-PSFConfigValue -FullName 'AzOps.Core.ThrottleLimit') -Parallel {
+                        $resource = $_
+                        $runspaceData = $using:runspaceData
+
+                        Import-Module "$([PSFramework.PSFCore.PSFCoreHost]::ModuleRoot)/PSFramework.psd1"
+                        $azOps = Import-Module $runspaceData.AzOpsPath -Force -PassThru
+
+                        & $azOps {
+                            $script:AzOpsAzManagementGroup = $runspaceData.runspace_AzOpsAzManagementGroup
+                            $script:AzOpsSubscriptions = $runspaceData.runspace_AzOpsSubscriptions
+                            $script:AzOpsPartialRoot = $runspaceData.runspace_AzOpsPartialRoot
+                            $script:AzOpsResourceProvider = $runspaceData.runspace_AzOpsResourceProvider
+                            $script:AzOpsGraphResourceProvider = $runspaceData.runspace_AzOpsGraphResourceProvider
+                        }
+                        $context = Get-AzContext
+                        $context.Subscription.Id = $resource.subscriptionId
+                        $tempExportPath = [System.IO.Path]::GetTempPath() + (New-Guid).ToString() + '.json'
+                        try {
+                            & $azOps {
+                                # Validate resource group name before calling Export-AzResourceGroup
+                                if ([string]::IsNullOrEmpty($resource.resourceGroup)) {
+                                    Write-AzOpsMessage -LogLevel Debug -LogString 'Get-AzOpsResourceDefinition.Processing.ChildResource.SkippingNoResourceGroup' -LogStringValues $resource.name, $resource.id -Target $resource
+                                    return
+                                }
+                                $exportParameters = @{
+                                    Resource                = $resource.id
+                                    ResourceGroupName       = $resource.resourceGroup
+                                    SkipAllParameterization = $true
+                                    Path                    = $tempExportPath
+                                    DefaultProfile          = $context | Select-Object -First 1
+                                }
+                                Invoke-AzOpsScriptBlock -ArgumentList $exportParameters -ScriptBlock {
+                                    param (
+                                        $ExportParameters
+                                    )
+                                    $param = $ExportParameters | Write-Output
+                                    Export-AzResourceGroup @param -Confirm:$false -Force -ErrorAction Stop | Out-Null
+                                } -RetryCount $runspaceData.MaxRetryCount -RetryWait $runspaceData.BackoffMultiplier -RetryType Exponential
+                            }
+                            $exportResources = (Get-Content -Path $tempExportPath | ConvertFrom-Json).resources
+                            $resourceGroup = $using:resourceGroups | Where-Object {$_.subscriptionId -eq $resource.subscriptionId -and $_.name -eq $resource.resourceGroup}
+                            foreach ($exportResource in $exportResources) {
+                                if (-not(($resource.name -eq $exportResource.name) -and ($resource.type -eq $exportResource.type))) {
+                                    & $azOps {
+                                        Write-AzOpsMessage -LogLevel Verbose -LogString 'Get-AzOpsResourceDefinition.Processing.ChildResource' -LogStringValues $exportResource.name, $resource.resourceGroup -FunctionName "Get-AzOpsResourceDefinition" -ModuleName "AzOps" -Target $exportResource
+                                    }
+                                    $ChildResource = @{
+                                        resourceProvider = $exportResource.type -replace '/', '_'
+                                        resourceName     = $exportResource.name -replace '/', '_'
+                                        parentResourceId = $resourceGroup.id
+                                    }
+                                    if (Get-Member -InputObject $exportResource -name 'dependsOn') {
+                                        $exportResource.PsObject.Members.Remove('dependsOn')
+                                    }
+                                    $resourceHash = @{resources = @($exportResource) }
+                                    & $azOps {
+                                        ConvertTo-AzOpsState -Resource $resourceHash -ChildResource $ChildResource -StatePath $runspaceData.Statepath
+                                    }
+                                }
+                            }
+                        }
+                        catch {
+                            & $azOps {
+                                Write-AzOpsMessage -LogLevel Warning -LogString 'Get-AzOpsResourceDefinition.ChildResource.Warning' -LogStringValues $resource.resourceGroup, ($exportParameters | Out-String -NoNewline), $_ -FunctionName "Get-AzOpsResourceDefinition" -ModuleName "AzOps"
+                            }
+                        }
+                        if (Test-Path -Path $tempExportPath) {
+                            Remove-Item -Path $tempExportPath -Force
+                        }
+                    }
+                    Clear-PSFMessage
+                }
+                else {
+                    Write-AzOpsMessage -LogLevel Debug -LogString 'Get-AzOpsResourceDefinition.SkippingChildResources' -Target $ScopeObject
+                }
+            }
+        }
+        #endregion Process Resource Groups
+        Write-AzOpsMessage -LogLevel Debug -LogString 'Get-AzOpsResourceDefinition.Finished' -LogStringValues $scopeObject.Scope -Target $ScopeObject
+    }
+}
